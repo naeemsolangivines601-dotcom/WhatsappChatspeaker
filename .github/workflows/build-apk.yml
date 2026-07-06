@@ -1,1 +1,710 @@
+name: Build APK (Self-Contained v2)
 
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Write all project files
+        run: |
+          mkdir -p "$(dirname "gradle.properties")"
+          cat > "gradle.properties" << 'FILEEOF'
+          android.useAndroidX=true
+          android.enableJetifier=true
+          android.nonTransitiveRClass=true
+          FILEEOF
+
+          mkdir -p "$(dirname "settings.gradle")"
+          cat > "settings.gradle" << 'FILEEOF'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "WhatsAppVoiceAlert"
+          include ':app'
+          FILEEOF
+
+          mkdir -p "$(dirname "build.gradle")"
+          cat > "build.gradle" << 'FILEEOF'
+          buildscript {
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+
+          plugins {
+              id 'com.android.application' version '8.2.0' apply false
+              id 'org.jetbrains.kotlin.android' version '1.9.20' apply false
+          }
+          FILEEOF
+
+          mkdir -p "$(dirname "app/build.gradle")"
+          cat > "app/build.gradle" << 'FILEEOF'
+          plugins {
+              id 'com.android.application'
+              id 'org.jetbrains.kotlin.android'
+          }
+
+          android {
+              namespace 'com.naeem.whatsappvoice'
+              compileSdk 34
+
+              defaultConfig {
+                  applicationId "com.naeem.whatsappvoice"
+                  minSdk 24
+                  targetSdk 34
+                  versionCode 1
+                  versionName "1.0"
+              }
+
+              buildTypes {
+                  release {
+                      minifyEnabled false
+                  }
+              }
+
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_1_8
+                  targetCompatibility JavaVersion.VERSION_1_8
+              }
+
+              kotlinOptions {
+                  jvmTarget = '1.8'
+              }
+
+              buildFeatures {
+                  viewBinding true
+              }
+          }
+
+          dependencies {
+              implementation 'androidx.core:core-ktx:1.12.0'
+              implementation 'androidx.appcompat:appcompat:1.6.1'
+              implementation 'com.google.android.material:material:1.11.0'
+              implementation 'androidx.constraintlayout:constraintlayout:2.1.4'
+          }
+          FILEEOF
+
+          mkdir -p "$(dirname "app/src/main/AndroidManifest.xml")"
+          cat > "app/src/main/AndroidManifest.xml" << 'FILEEOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+              <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+              <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+              <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+
+              <application
+                  android:allowBackup="true"
+                  android:icon="@mipmap/ic_launcher"
+                  android:label="WA Voice Alert"
+                  android:roundIcon="@mipmap/ic_launcher"
+                  android:supportsRtl="true"
+                  android:theme="@style/Theme.WAVoiceAlert">
+
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+
+                  <service
+                      android:name=".WhatsAppNotificationListener"
+                      android:label="WhatsApp Voice Listener"
+                      android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE"
+                      android:exported="false">
+                      <intent-filter>
+                          <action android:name="android.service.notification.NotificationListenerService" />
+                      </intent-filter>
+                  </service>
+
+                  <receiver
+                      android:name=".BootReceiver"
+                      android:exported="true"
+                      android:enabled="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.BOOT_COMPLETED" />
+                      </intent-filter>
+                  </receiver>
+
+              </application>
+
+          </manifest>
+          FILEEOF
+
+          mkdir -p "$(dirname "app/src/main/java/com/naeem/whatsappvoice/TtsHelper.kt")"
+          cat > "app/src/main/java/com/naeem/whatsappvoice/TtsHelper.kt" << 'FILEEOF'
+          package com.naeem.whatsappvoice
+
+          import android.speech.tts.TextToSpeech
+          import android.speech.tts.Voice
+          import java.util.Locale
+
+          // Yeh helper dono jagah (MainActivity aur background service) se use hota hai
+          // taake awaaz hamesha ek jaisi aur behtar quality ki ho.
+          object TtsHelper {
+
+              // Priority order: pehle Urdu try karo, phir Hindi (Roman/Urdu-mila text ke liye
+              // sabse zyada natural sunta hai), phir Indian English, phir US English.
+              private val PREFERRED_LOCALES = listOf(
+                  Locale("ur", "PK"),
+                  Locale("hi", "IN"),
+                  Locale("en", "IN"),
+                  Locale.US
+              )
+
+              fun configure(tts: TextToSpeech) {
+                  var chosenLocale: Locale? = null
+
+                  for (locale in PREFERRED_LOCALES) {
+                      val result = tts.isLanguageAvailable(locale)
+                      if (result >= TextToSpeech.LANG_AVAILABLE) {
+                          chosenLocale = locale
+                          break
+                      }
+                  }
+
+                  if (chosenLocale != null) {
+                      tts.language = chosenLocale
+
+                      // Available voices mein se sabse behtar (high quality, on-device) voice chuno
+                      try {
+                          val candidates: List<Voice> = tts.voices
+                              ?.filter { it.locale.language == chosenLocale.language }
+                              ?: emptyList()
+
+                          val bestVoice = candidates
+                              .filter { !it.isNetworkConnectionRequired }
+                              .maxByOrNull { it.quality }
+                              ?: candidates.maxByOrNull { it.quality }
+
+                          if (bestVoice != null) {
+                              tts.voice = bestVoice
+                          }
+                      } catch (e: Exception) {
+                          // Voice list na milne par default language setting hi kaafi hai
+                      }
+                  } else {
+                      tts.language = Locale.US
+                  }
+
+                  // Bohot tez bolne se awaaz robotic lagti hai — thoda slow aur natural rate behtar hai
+                  tts.setSpeechRate(0.92f)
+                  tts.setPitch(1.0f)
+              }
+          }
+          FILEEOF
+
+          mkdir -p "$(dirname "app/src/main/java/com/naeem/whatsappvoice/BootReceiver.kt")"
+          cat > "app/src/main/java/com/naeem/whatsappvoice/BootReceiver.kt" << 'FILEEOF'
+          package com.naeem.whatsappvoice
+
+          import android.content.BroadcastReceiver
+          import android.content.ComponentName
+          import android.content.Context
+          import android.content.Intent
+          import android.service.notification.NotificationListenerService
+
+          // Phone restart hone ke baad Android background services ko rok deta hai.
+          // Yeh receiver boot complete hote hi listener service ko dobara jagata hai
+          // taake user ko dobara Settings mein jaake kuch enable na karna pade.
+          class BootReceiver : BroadcastReceiver() {
+              override fun onReceive(context: Context, intent: Intent) {
+                  if (intent.action == Intent.ACTION_BOOT_COMPLETED) {
+                      try {
+                          val componentName = ComponentName(context, WhatsAppNotificationListener::class.java)
+                          NotificationListenerService.requestRebind(componentName)
+                      } catch (e: Exception) {
+                          // Agar rebind fail ho, service khud bhi Android ke through dobara connect ho jayegi
+                      }
+                  }
+              }
+          }
+          FILEEOF
+
+          mkdir -p "$(dirname "app/src/main/java/com/naeem/whatsappvoice/MainActivity.kt")"
+          cat > "app/src/main/java/com/naeem/whatsappvoice/MainActivity.kt" << 'FILEEOF'
+          package com.naeem.whatsappvoice
+
+          import android.content.ComponentName
+          import android.content.Context
+          import android.content.Intent
+          import android.content.SharedPreferences
+          import android.net.Uri
+          import android.os.Bundle
+          import android.os.PowerManager
+          import android.provider.Settings
+          import android.speech.tts.TextToSpeech
+          import android.widget.Button
+          import android.widget.EditText
+          import android.widget.TextView
+          import android.widget.Toast
+          import androidx.appcompat.app.AppCompatActivity
+
+          class MainActivity : AppCompatActivity(), TextToSpeech.OnInitListener {
+
+              private lateinit var tts: TextToSpeech
+              private lateinit var tvStatus: TextView
+              private lateinit var etUserName: EditText
+              private lateinit var prefs: SharedPreferences
+              private lateinit var btnBattery: Button
+
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  setContentView(R.layout.activity_main)
+
+                  prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+
+                  tvStatus = findViewById(R.id.tvStatus)
+                  etUserName = findViewById(R.id.etUserName)
+                  val btnEnable: Button = findViewById(R.id.btnEnable)
+                  btnBattery = findViewById(R.id.btnBattery)
+                  val btnSaveName: Button = findViewById(R.id.btnSaveName)
+                  val btnTest: Button = findViewById(R.id.btnTest)
+
+                  etUserName.setText(prefs.getString(KEY_USER_NAME, ""))
+
+                  tts = TextToSpeech(this, this)
+
+                  btnEnable.setOnClickListener {
+                      startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
+                  }
+
+                  // Sirf ek tap se Android khud poochta hai "is app ko battery optimization se bahar
+                  // rakhein?" — user ko Settings mein khud dhoondhna nahi padta.
+                  btnBattery.setOnClickListener {
+                      requestIgnoreBatteryOptimizations()
+                  }
+
+                  btnSaveName.setOnClickListener {
+                      val name = etUserName.text.toString().trim()
+                      if (name.isEmpty()) {
+                          Toast.makeText(this, "Pehle apna naam likhein", Toast.LENGTH_SHORT).show()
+                      } else {
+                          prefs.edit().putString(KEY_USER_NAME, name).apply()
+                          Toast.makeText(this, "Naam save ho gaya: $name", Toast.LENGTH_SHORT).show()
+                      }
+                  }
+
+                  btnTest.setOnClickListener {
+                      val name = prefs.getString(KEY_USER_NAME, null)?.takeIf { it.isNotBlank() } ?: "Dost"
+                      speak("$name, aapko Ali se yeh message aaya hai. Kal milte hain")
+                  }
+              }
+
+              override fun onResume() {
+                  super.onResume()
+                  updateStatus()
+              }
+
+              private fun requestIgnoreBatteryOptimizations() {
+                  val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+                  if (!pm.isIgnoringBatteryOptimizations(packageName)) {
+                      val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
+                          data = Uri.parse("package:$packageName")
+                      }
+                      startActivity(intent)
+                  } else {
+                      Toast.makeText(this, "Yeh pehle se ON hai", Toast.LENGTH_SHORT).show()
+                  }
+              }
+
+              private fun updateStatus() {
+                  val notifEnabled = isNotificationServiceEnabled()
+                  val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+                  val batteryOk = pm.isIgnoringBatteryOptimizations(packageName)
+
+                  btnBattery.text = if (batteryOk) {
+                      "Background Mode: ✅ ON"
+                  } else {
+                      "Background Mode ON Karein (1 Tap)"
+                  }
+
+                  tvStatus.text = when {
+                      notifEnabled && batteryOk ->
+                          "Status: ✅ Sab kuch sahi hai — messages background mein bhi sunai denge"
+                      notifEnabled && !batteryOk ->
+                          "Status: ⚠️ Notification access ON hai, lekin neeche wala 'Background Mode' button bhi dabayein"
+                      else ->
+                          "Status: ❌ Neeche 'Enable Notification Access' button dabayein"
+                  }
+              }
+
+              private fun isNotificationServiceEnabled(): Boolean {
+                  val pkgName = packageName
+                  val flat = Settings.Secure.getString(contentResolver, "enabled_notification_listeners")
+                  if (flat != null) {
+                      val names = flat.split(":")
+                      for (name in names) {
+                          val cn = ComponentName.unflattenFromString(name)
+                          if (cn != null && cn.packageName == pkgName) {
+                              return true
+                          }
+                      }
+                  }
+                  return false
+              }
+
+              override fun onInit(status: Int) {
+                  if (status == TextToSpeech.SUCCESS) {
+                      TtsHelper.configure(tts)
+                  } else {
+                      Toast.makeText(this, "TTS init failed", Toast.LENGTH_SHORT).show()
+                  }
+              }
+
+              private fun speak(text: String) {
+                  tts.speak(text, TextToSpeech.QUEUE_FLUSH, null, "test_utterance")
+              }
+
+              override fun onDestroy() {
+                  tts.stop()
+                  tts.shutdown()
+                  super.onDestroy()
+              }
+
+              companion object {
+                  const val PREFS_NAME = "WAVoiceAlertPrefs"
+                  const val KEY_USER_NAME = "user_name"
+              }
+          }
+          FILEEOF
+
+          mkdir -p "$(dirname "app/src/main/java/com/naeem/whatsappvoice/WhatsAppNotificationListener.kt")"
+          cat > "app/src/main/java/com/naeem/whatsappvoice/WhatsAppNotificationListener.kt" << 'FILEEOF'
+          package com.naeem.whatsappvoice
+
+          import android.app.Notification
+          import android.app.Service
+          import android.content.Context
+          import android.content.Intent
+          import android.content.SharedPreferences
+          import android.os.Handler
+          import android.os.Looper
+          import android.service.notification.NotificationListenerService
+          import android.service.notification.StatusBarNotification
+          import android.speech.tts.TextToSpeech
+          import androidx.core.app.NotificationCompat
+
+          class WhatsAppNotificationListener : NotificationListenerService(), TextToSpeech.OnInitListener {
+
+              private lateinit var tts: TextToSpeech
+              private lateinit var prefs: SharedPreferences
+              private var ttsReady = false
+
+              private val targetPackages = setOf("com.whatsapp", "com.whatsapp.w4b")
+
+              // Chhota sa wait taake agar user turant chat khol kar parh le, voice cancel ho jaye
+              private val ANNOUNCE_DELAY_MS = 1200L
+
+              // Agar message isse zyada purana hai (jaise service restart hone par purani/backlog
+              // notifications dobara mil jayen), to use bilkul mat bolo — sirf taaza messages bolne hain
+              private val MAX_MESSAGE_AGE_MS = 5 * 60 * 1000L
+
+              private val mainHandler = Handler(Looper.getMainLooper())
+              private val pendingRunnables = HashMap<String, Runnable>()
+              private val spokenMessageIds = HashSet<String>()
+
+              override fun onCreate() {
+                  super.onCreate()
+                  prefs = applicationContext.getSharedPreferences(MainActivity.PREFS_NAME, Context.MODE_PRIVATE)
+                  tts = TextToSpeech(this, this)
+              }
+
+              // Agar system kabhi resources kam hone par service ko band kare, START_STICKY
+              // Android ko batata hai ke isay dobara khud shuru kar dena — user ko kuch nahi karna padta
+              override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+                  super.onStartCommand(intent, flags, startId)
+                  return Service.START_STICKY
+              }
+
+              override fun onInit(status: Int) {
+                  ttsReady = status == TextToSpeech.SUCCESS
+                  if (ttsReady) {
+                      TtsHelper.configure(tts)
+                  }
+              }
+
+              override fun onNotificationPosted(sbn: StatusBarNotification) {
+                  if (sbn.packageName !in targetPackages) return
+                  if (sbn.notification.flags and Notification.FLAG_GROUP_SUMMARY != 0) return
+
+                  val key = sbn.key
+
+                  // Isi conversation ka pehla pending announcement cancel karo (purana replace ho raha hai)
+                  pendingRunnables[key]?.let { mainHandler.removeCallbacks(it) }
+
+                  val extras = sbn.notification.extras
+                  var title = extras.getString(Notification.EXTRA_TITLE) ?: "Unknown Contact"
+                  var text: String?
+                  var messageTimestamp = sbn.postTime
+
+                  // MessagingStyle se SIRF sabse naya message nikalte hain (purane messages dobara nahi bolenge)
+                  val messagingStyle = NotificationCompat.MessagingStyle
+                      .extractMessagingStyleFromNotification(sbn.notification)
+
+                  if (messagingStyle != null && messagingStyle.messages.isNotEmpty()) {
+                      val lastMsg = messagingStyle.messages.last()
+                      text = lastMsg.text?.toString()
+                      messageTimestamp = lastMsg.timestamp
+                      title = messagingStyle.conversationTitle?.toString()
+                          ?: lastMsg.person?.name?.toString()
+                          ?: title
+                  } else {
+                      text = extras.getCharSequence(Notification.EXTRA_TEXT)?.toString()
+                  }
+
+                  if (text.isNullOrBlank()) return
+
+                  // Purana/backlog message hai to bilkul skip karo — sirf abhi ke messages bolne hain
+                  val messageAge = System.currentTimeMillis() - messageTimestamp
+                  if (messageAge > MAX_MESSAGE_AGE_MS) return
+
+                  val messageId = "$key|$messageTimestamp|$text"
+                  if (spokenMessageIds.contains(messageId)) return
+
+                  val userName = prefs.getString(MainActivity.KEY_USER_NAME, null)?.takeIf { it.isNotBlank() } ?: "Dost"
+                  val spokenText = "$userName, aapko $title se yeh message aaya hai. $text"
+
+                  val runnable = Runnable {
+                      if (ttsReady) {
+                          tts.speak(spokenText, TextToSpeech.QUEUE_FLUSH, null, messageId)
+                          spokenMessageIds.add(messageId)
+                      }
+                      pendingRunnables.remove(key)
+                  }
+
+                  pendingRunnables[key] = runnable
+                  mainHandler.postDelayed(runnable, ANNOUNCE_DELAY_MS)
+              }
+
+              override fun onNotificationRemoved(sbn: StatusBarNotification) {
+                  if (sbn.packageName !in targetPackages) return
+                  val key = sbn.key
+                  // Agar user ne notification khud parh li / chat khol li, pending voice cancel kar do
+                  pendingRunnables[key]?.let {
+                      mainHandler.removeCallbacks(it)
+                      pendingRunnables.remove(key)
+                  }
+              }
+
+              override fun onDestroy() {
+                  mainHandler.removeCallbacksAndMessages(null)
+                  if (::tts.isInitialized) {
+                      tts.stop()
+                      tts.shutdown()
+                  }
+                  super.onDestroy()
+              }
+          }
+          FILEEOF
+
+          mkdir -p "$(dirname "app/src/main/res/layout/activity_main.xml")"
+          cat > "app/src/main/res/layout/activity_main.xml" << 'FILEEOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+              android:layout_width="match_parent"
+              android:layout_height="match_parent"
+              android:background="#ECE5DD">
+
+          <LinearLayout
+              android:layout_width="match_parent"
+              android:layout_height="wrap_content"
+              android:orientation="vertical"
+              android:gravity="center"
+              android:padding="32dp">
+
+              <TextView
+                  android:layout_width="wrap_content"
+                  android:layout_height="wrap_content"
+                  android:text="WhatsApp Voice Alert"
+                  android:textSize="24sp"
+                  android:textStyle="bold"
+                  android:textColor="#075E54"
+                  android:layout_marginBottom="16dp" />
+
+              <TextView
+                  android:id="@+id/tvStatus"
+                  android:layout_width="match_parent"
+                  android:layout_height="wrap_content"
+                  android:text="Status: Checking..."
+                  android:textSize="16sp"
+                  android:gravity="center"
+                  android:layout_marginBottom="24dp" />
+
+              <Button
+                  android:id="@+id/btnEnable"
+                  android:layout_width="match_parent"
+                  android:layout_height="56dp"
+                  android:text="Enable Notification Access"
+                  android:backgroundTint="#25D366"
+                  android:textColor="#FFFFFF"
+                  android:layout_marginBottom="16dp" />
+
+              <Button
+                  android:id="@+id/btnBattery"
+                  android:layout_width="match_parent"
+                  android:layout_height="56dp"
+                  android:text="Background Mode ON Karein (1 Tap)"
+                  android:backgroundTint="#25D366"
+                  android:textColor="#FFFFFF"
+                  android:layout_marginBottom="28dp" />
+
+              <TextView
+                  android:layout_width="match_parent"
+                  android:layout_height="wrap_content"
+                  android:text="Aapka Naam (yehi bola jayega):"
+                  android:textSize="15sp"
+                  android:textStyle="bold"
+                  android:textColor="#075E54"
+                  android:layout_marginBottom="8dp" />
+
+              <EditText
+                  android:id="@+id/etUserName"
+                  android:layout_width="match_parent"
+                  android:layout_height="wrap_content"
+                  android:hint="Jaise: Ahmed, Sara, Bilal"
+                  android:inputType="textPersonName"
+                  android:padding="14dp"
+                  android:background="#FFFFFF"
+                  android:textColor="#000000"
+                  android:layout_marginBottom="12dp" />
+
+              <Button
+                  android:id="@+id/btnSaveName"
+                  android:layout_width="match_parent"
+                  android:layout_height="56dp"
+                  android:text="Naam Save Karein"
+                  android:backgroundTint="#075E54"
+                  android:textColor="#FFFFFF"
+                  android:layout_marginBottom="28dp" />
+
+              <Button
+                  android:id="@+id/btnTest"
+                  android:layout_width="match_parent"
+                  android:layout_height="56dp"
+                  android:text="Test Voice (Bol ke Dikhao)"
+                  android:backgroundTint="#128C7E"
+                  android:textColor="#FFFFFF" />
+
+              <TextView
+                  android:layout_width="match_parent"
+                  android:layout_height="wrap_content"
+                  android:layout_marginTop="24dp"
+                  android:text="Note: Dono buttons (Notification Access + Background Mode) ek dafa ON kar dein — uske baad app khud background mein kaam karti rahegi, dobara kuch karne ki zaroorat nahi."
+                  android:textSize="13sp"
+                  android:textColor="#666666"
+                  android:gravity="center" />
+
+          </LinearLayout>
+          </ScrollView>
+          FILEEOF
+
+          mkdir -p "$(dirname "app/src/main/res/values/strings.xml")"
+          cat > "app/src/main/res/values/strings.xml" << 'FILEEOF'
+          <resources>
+              <string name="app_name">WA Voice Alert</string>
+          </resources>
+          FILEEOF
+
+          mkdir -p "$(dirname "app/src/main/res/values/themes.xml")"
+          cat > "app/src/main/res/values/themes.xml" << 'FILEEOF'
+          <resources>
+              <style name="Theme.WAVoiceAlert" parent="Theme.MaterialComponents.DayNight.NoActionBar">
+                  <item name="colorPrimary">#128C7E</item>
+                  <item name="colorPrimaryDark">#075E54</item>
+                  <item name="colorAccent">#25D366</item>
+              </style>
+          </resources>
+          FILEEOF
+
+          mkdir -p "$(dirname "app/src/main/res/drawable/ic_launcher_background.xml")"
+          cat > "app/src/main/res/drawable/ic_launcher_background.xml" << 'FILEEOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <shape xmlns:android="http://schemas.android.com/apk/res/android">
+              <solid android:color="#075E54" />
+          </shape>
+          FILEEOF
+
+          mkdir -p "$(dirname "app/src/main/res/drawable/ic_launcher_foreground.xml")"
+          cat > "app/src/main/res/drawable/ic_launcher_foreground.xml" << 'FILEEOF'
+          <vector xmlns:android="http://schemas.android.com/apk/res/android"
+              android:width="108dp"
+              android:height="108dp"
+              android:viewportWidth="108"
+              android:viewportHeight="108">
+              <path
+                  android:fillColor="#25D366"
+                  android:pathData="M54,30 a14,14 0 0 1 14,14 v14 a14,14 0 0 1 -28,0 v-14 a14,14 0 0 1 14,-14 Z" />
+              <path
+                  android:fillColor="#FFFFFF"
+                  android:pathData="M38,58 v4 a16,16 0 0 0 32,0 v-4 h-4 v4 a12,12 0 0 1 -24,0 v-4 Z" />
+              <path
+                  android:fillColor="#FFFFFF"
+                  android:pathData="M52,78 h4 v8 h-4 Z" />
+          </vector>
+          FILEEOF
+
+          mkdir -p "$(dirname "app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml")"
+          cat > "app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml" << 'FILEEOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+              <background android:drawable="@drawable/ic_launcher_background" />
+              <foreground android:drawable="@drawable/ic_launcher_foreground" />
+          </adaptive-icon>
+          FILEEOF
+
+          mkdir -p "app/src/main/res/mipmap-mdpi"
+          echo "iVBORw0KGgoAAAANSUhEUgAAADAAAAAwCAYAAABXAvmHAAAA7ElEQVR4nO2YwQ0CMQwEDTqJPwVQFe/rgirokgJoAV75IAGxd2Mnsvd7l/VOfFEuOZz260sW1jE6AKoCiFYBRKsAorU8wMY2vNzOP58/7k9qPRrAv+Cf77FAYIDe4N/GoSDQGrCGZ3qYARjhGV4mAGZ41FMNMCI84q0CGBneWmP5jawbwGP2LbVydMBz9rU1c3RgZhVAtAogWjkA2MdAZs0cHRDx7YKmVp4OiPh0QVtD3YGREBZv0yc0AsLqaV4DTAjEC1rEDAjUA76ZawG0h55prhabekGmvdxt8v7tyLWRzagCiFYBRKsAovUGgw9DfwH3HcQAAAAASUVORK5CYII=" | base64 -d > app/src/main/res/mipmap-mdpi/ic_launcher.png
+          echo 'Project files written:'
+          find . -not -path './.git*' -type f
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Generate Gradle Wrapper
+        uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: '8.7'
+
+      - name: Create Gradle Wrapper files
+        run: gradle wrapper --gradle-version 8.7
+
+      - name: Grant execute permission for gradlew
+        run: chmod +x ./gradlew
+
+      - name: Build Debug APK
+        run: ./gradlew assembleDebug --stacktrace
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-debug
+          path: app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
